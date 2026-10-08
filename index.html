@@ -12,7 +12,7 @@
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icon.svg">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
-<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="style.css?v=20261008">
 </head>
 <body>
 <div id="map"></div>
@@ -21,16 +21,50 @@
 <section id="sheet" class="sheet">
   <button id="handle" class="handle" aria-label="展開或收合"><span></span></button>
   <nav class="tabs" role="tablist">
-    <button role="tab" data-tab="watch" aria-selected="true">查看列表</button>
+    <button role="tab" data-tab="watch" aria-selected="true">公車</button>
+    <button role="tab" data-tab="near" aria-selected="false">附近站牌</button>
     <button role="tab" data-tab="plan" aria-selected="false">規劃路線</button>
   </nav>
 
   <div id="tab-watch" class="tab">
     <input id="q" class="search" type="search" placeholder="搜尋公車路線,例如 307、紅30、藍38" autocomplete="off" enterkeyhint="search">
     <ul id="results" class="list" hidden></ul>
-    <ul id="watch" class="list"></ul>
-    <p id="watch-empty" class="hint">搜尋路線後按「加入」,地圖上就會顯示這條路線去程和返程的車。<br>
-      <span class="legend"><i class="lg go"></i>實心:去程　<i class="lg back"></i>空心:返程　箭頭是行駛方向</span></p>
+    <div id="home" class="scroll">
+      <section id="favs-box" hidden>
+        <h3 class="sec">常用站牌<span id="favs-upd" class="sec-note"></span><button id="favs-edit" class="link">編輯</button></h3>
+        <ul id="favs" class="list"></ul>
+      </section>
+      <section id="watch-box" hidden>
+        <h3 class="sec">地圖上的路線</h3>
+        <ul id="watch" class="list"></ul>
+      </section>
+      <p id="watch-empty" class="hint">搜尋路線,點進去就能看到每一站的預估到站時間和公車位置。<br>
+        在站牌旁按 ☆ 加入「常用站牌」,下次打開首頁就看得到。<br>
+        按「加入」會讓這條路線的車一直顯示在地圖上:
+        <span class="legend"><i class="lg go"></i>實心:去程　<i class="lg back"></i>空心:返程　箭頭是行駛方向</span></p>
+    </div>
+  </div>
+
+  <div id="tab-near" class="tab" hidden>
+    <div class="near-bar">
+      <span id="near-where" class="near-where"></span>
+      <button id="near-gps" class="btn sm">重新定位</button>
+      <button id="near-center" class="btn sm">用地圖中心</button>
+    </div>
+    <p id="near-upd" class="upd"></p>
+    <p id="near-msg" class="hint" hidden></p>
+    <div id="near" class="scroll"></div>
+  </div>
+
+  <div id="tab-route" class="tab" hidden>
+    <div class="rt-head">
+      <button id="rt-back" class="icon-btn" aria-label="返回"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg></button>
+      <div class="rt-title"><b id="rt-name"></b><span id="rt-city" class="tag"></span><small id="rt-sub"></small></div>
+      <button id="rt-pin" class="btn sm">加入地圖</button>
+    </div>
+    <div id="rt-dirs" class="seg" role="tablist"></div>
+    <p id="rt-upd" class="upd"></p>
+    <ol id="rt-stops" class="stops"></ol>
   </div>
 
   <div id="tab-plan" class="tab" hidden>
@@ -49,7 +83,9 @@
 </section>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
-<script src="app.js"></script>
-<script src="plan.js"></script>
+<!-- 改了 js/css 要一起改 ?v=,否則 GitHub Pages 的快取可能讓新的 index.html 配到舊的 js -->
+<script src="app.js?v=20261008"></script>
+<script src="bus.js?v=20261008"></script>
+<script src="plan.js?v=20261008"></script>
 </body>
 </html>
