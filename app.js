@@ -1,430 +1,420 @@
-'use strict';
+(function () {
+  'use strict';
 
-// 臺北市、新北市公車動態資訊中心的開放資料:不用金鑰、允許跨網域讀取,約每 15 秒更新。
-// 兩個城市的路線、子路線、車輛完全不重疊。
-const FEEDS = {
-  tpe: { name: '台北', base: 'https://tcgbusfs.blob.core.windows.net/blobbus/' },
-  ntpc: { name: '新北', base: 'https://tcgbusfs.blob.core.windows.net/ntpcbus/' },
-};
-const POLL_MS = 15000;
-const ROUTE_CACHE_MS = 12 * 3600e3;
-const PALETTE = ['#d62728', '#1f62b4', '#2a8a2a', '#8e44ad', '#d35400', '#00838f',
-  '#c2185b', '#6d4c41', '#3949ab', '#827717', '#00695c', '#455a64'];
+  var cfg = window.APP_CONFIG || {};
+  // ?dev=1 測試模式:不經過 LINE 登入,用假身分(後端 DEV_MODE=true 才接受)。?dev=admin 會以老闆身分登入。
+  var devUser = new URLSearchParams(location.search).get('dev');
+  var state = { data: null, date: null, time: null, tab: 'book', busy: false };
+  var $ = function (id) { return document.getElementById(id); };
 
-// localStorage 在私密瀏覽等情況可能無法使用,讀寫失敗時當作沒有資料
-const LS = {
-  get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch { return d; } },
-  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* 忽略 */ } },
-};
+  // ---------- 工具 ----------
 
-const $ = (s) => document.querySelector(s);
-const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const parseTw = (s) => Date.parse(s.replace(' ', 'T') + '+08:00');   // '2026-10-08 15:10:10'(台灣時間)
-
-let routes = {};      // 'tpe:10142' → { k, c, n, e, d, t, p, pa: [子路線編號...] }
-let routeList = [];
-let paIndex = {};     // 'tpe:157758' → 路線 key(即時資料的 RouteID 是子路線編號)
-let watch = LS.get('watch:v1', []);   // [{ k, color }]
-let lastData = {};    // city → { at, rows }
-let lastErr = {};     // city → 錯誤訊息
-let counts = {};      // 路線 key → [去程台數, 返程台數]
-let pendingFit = null;
-
-// ---------- 資料下載 ----------
-
-async function fetchGz(url, fresh) {
-  const res = await fetch(url, { cache: fresh ? 'no-store' : 'default' });
-  if (!res.ok) throw new Error('HTTP ' + res.status);
-  const text = await new Response(res.body.pipeThrough(new DecompressionStream('gzip'))).text();
-  return JSON.parse(text.replace(/^﻿/, ''));   // 伺服器出錯時內容是 HTML,這裡會丟出例外
-}
-
-async function loadRoutes() {
-  const cached = LS.get('routes:v1', null);
-  if (cached && Date.now() - cached.t < ROUTE_CACHE_MS) return setRoutes(cached.r);
-  const out = [];
-  const results = await Promise.allSettled(Object.keys(FEEDS).map(async (city) => {
-    const j = await fetchGz(FEEDS[city].base + 'GetRoute.gz');
-    const by = {};
-    for (const r of j.BusInfo) {
-      const k = city + ':' + r.Id;
-      by[k] ??= { k, c: city, n: r.nameZh, e: r.nameEn || '', d: r.departureZh || '', t: r.destinationZh || '', p: r.providerName || '', pa: [] };
-      by[k].pa.push(r.pathAttributeId);
-    }
-    out.push(...Object.values(by));
-  }));
-  const ok = results.every((r) => r.status === 'fulfilled');
-  if (!out.length) {
-    if (cached) return setRoutes(cached.r);
-    throw new Error('路線資料下載失敗');
-  }
-  setRoutes(out);
-  if (ok) LS.set('routes:v1', { t: Date.now(), r: out });
-}
-
-function setRoutes(list) {
-  routeList = list;
-  routes = {};
-  paIndex = {};
-  for (const r of list) {
-    routes[r.k] = r;
-    for (const pa of r.pa) paIndex[r.c + ':' + pa] = r.k;
-  }
-}
-
-// ---------- 地圖 ----------
-
-const view = LS.get('view:v1', { c: [25.045, 121.53], z: 12 });
-const map = L.map('map', { zoomControl: false, attributionControl: false }).setView(view.c, view.z);
-L.control.attribution({ position: 'topleft', prefix: false }).addTo(map);
-L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-  maxZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
-}).addTo(map);
-L.control.zoom({ position: 'topright' }).addTo(map);
-map.on('moveend', () => { const c = map.getCenter(); LS.set('view:v1', { c: [c.lat, c.lng], z: map.getZoom() }); });
-
-// 路線線條與站牌(data/bus_stops.json,由 build_static.py 從 TDX 產生;沒有這個檔案就只顯示車)
-const canvas = L.canvas({ padding: 0.5 });
-const lineLayer = L.layerGroup().addTo(map);
-const stopLayer = L.layerGroup();
-let stopData = null;
-let stopDataPromise = null;
-
-function loadStops() {
-  stopDataPromise ??= fetch('data/bus_stops.json')
-    .then((r) => (r.ok ? r.json() : null))
-    .catch(() => null)
-    .then((d) => { stopData = d; drawLines(); });
-  return stopDataPromise;
-}
-
-function drawLines() {
-  lineLayer.clearLayers();
-  stopLayer.clearLayers();
-  if (!stopData) return;
-  for (const w of watch) {
-    const r = routes[w.k];
-    const ln = r && stopData.lines[w.k];
-    if (!ln) continue;
-    ln.forEach((ids, d) => {
-      const pts = ids.map((id) => stopData.stops[r.c + ':' + id]).filter(Boolean);
-      if (pts.length < 2) return;
-      // 站和站之間畫直線(不是沿著道路),實線是去程、虛線是返程
-      L.polyline(pts.map((p) => [p[2], p[1]]), {
-        renderer: canvas, color: w.color, weight: 4, opacity: 0.5, dashArray: d ? '6 8' : null, interactive: false,
-      }).addTo(lineLayer);
-      for (const p of pts) {
-        L.circleMarker([p[2], p[1]], { renderer: canvas, radius: 4, color: w.color, weight: 2, fillColor: '#fff', fillOpacity: 1 })
-          .bindTooltip(p[0], { direction: 'top', offset: [0, -4] }).addTo(stopLayer);
-      }
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
     });
   }
-}
 
-// 站牌點只在拉近時顯示
-const syncStopLayer = () => { if (map.getZoom() >= 15) stopLayer.addTo(map); else stopLayer.remove(); };
-map.on('zoomend', syncStopLayer);
-syncStopLayer();
+  /** 2026-10-01 + 四 → 10/1(四) */
+  function dateLabel(date, weekday) {
+    var p = date.split('-');
+    return Number(p[1]) + '/' + Number(p[2]) + '(' + weekday + ')';
+  }
 
-const busLayer = L.layerGroup().addTo(map);
-const markers = new Map();   // 'tpe:222235669' → marker(marker.bus 是最新資料)
+  function store(key, value) {
+    try {
+      if (value === undefined) return localStorage.getItem(key) || '';
+      localStorage.setItem(key, value);
+    } catch (e) { /* 無痕模式等情況讀寫不到,不影響使用 */ }
+    return '';
+  }
 
-const Locate = L.Control.extend({
-  options: { position: 'topright' },
-  onAdd() {
-    const div = L.DomUtil.create('div', 'leaflet-bar');
-    div.innerHTML = '<a href="#" class="locate" title="我的位置" role="button" aria-label="我的位置">◎</a>';
-    L.DomEvent.on(div.firstChild, 'click', (e) => { L.DomEvent.preventDefault(e); locate(); });
-    L.DomEvent.disableClickPropagation(div);
-    return div;
-  },
-});
-new Locate().addTo(map);
-let meMarker = null;
-function locate() {
-  if (!navigator.geolocation) return setStatus('這個瀏覽器不支援定位', true);
-  navigator.geolocation.getCurrentPosition((p) => {
-    const ll = [p.coords.latitude, p.coords.longitude];
-    if (!meMarker) meMarker = L.marker(ll, { icon: L.divIcon({ className: 'bus-icon', html: '<div class="me"></div>', iconSize: [16, 16] }), zIndexOffset: 1000 }).addTo(map);
-    else meMarker.setLatLng(ll);
-    map.setView(ll, Math.max(map.getZoom(), 15));
-  }, () => setStatus('無法取得位置(請允許定位權限)', true), { enableHighAccuracy: true, timeout: 10000 });
-}
+  async function api(action, payload) {
+    var body = Object.assign({ action: action }, payload || {});
+    if (devUser) body.devUserId = devUser;
+    else body.idToken = liff.getIDToken();
 
-function busIcon(bus) {
-  const r = routes[bus.rk];
-  const az = bus.az >= 0 && bus.az < 360 ? bus.az : null;
-  const html = `<div class="bus ${bus.dir === 1 ? 'back' : 'go'}" style="--c:${bus.color}">`
-    + (az !== null ? `<i class="hdg" style="transform:rotate(${az}deg)"></i>` : '')
-    + `<i class="dot"></i><b class="lbl">${esc(r.n)}</b></div>`;
-  return L.divIcon({ className: 'bus-icon', html, iconSize: [0, 0] });
-}
+    var res;
+    try {
+      // 不設 Content-Type(預設 text/plain),避免瀏覽器先送 CORS preflight,Apps Script 不支援
+      res = await fetch(cfg.API_URL, { method: 'POST', body: JSON.stringify(body) });
+    } catch (e) {
+      throw Object.assign(new Error('網路連線失敗,請確認網路後再試一次'), { code: 'NETWORK' });
+    }
+    if (!res.ok) throw Object.assign(new Error('伺服器沒有回應(' + res.status + '),請稍後再試'), { code: 'NETWORK' });
+    var json = await res.json();
+    if (!json.ok) throw Object.assign(new Error(json.error), { code: json.code });
+    return json.data;
+  }
 
-function dirText(r, dir) {
-  if (dir === 0) return '往 ' + r.t;
-  if (dir === 1) return '往 ' + r.d;
-  return '';
-}
+  // ---------- 對話框 ----------
 
-function popupHtml(bus) {
-  const r = routes[bus.rk];
-  const age = Math.max(0, Math.round((Date.now() - parseTw(bus.time)) / 1000));
-  return `<div class="pop"><b style="color:${bus.color}">${esc(r.n)}</b> ${esc(dirText(r, bus.dir))}<br>`
-    + `車牌 ${esc(bus.plate)}・時速 ${bus.speed} km/h<br>`
-    + `<span class="muted">${esc(bus.time.slice(11))}(${age} 秒前)・${esc(r.p)}</span></div>`;
-}
+  function modal(html, buttons) {
+    return new Promise(function (resolve) {
+      $('modalBody').innerHTML = html;
+      var actions = $('modalActions');
+      actions.innerHTML = '';
+      buttons.forEach(function (b) {
+        var el = document.createElement('button');
+        el.type = 'button';
+        el.textContent = b.label;
+        el.className = b.className || 'ghost';
+        el.onclick = function () { $('modal').hidden = true; resolve(b.value); };
+        actions.appendChild(el);
+      });
+      $('modal').hidden = false;
+    });
+  }
 
-function drawBuses() {
-  const watched = new Map(watch.map((w) => [w.k, w]));
-  const seen = new Set();
-  counts = {};
-  for (const [c, d] of Object.entries(lastData)) {
-    for (const b of d.rows) {
-      if (b.DutyStatus !== '1') continue;          // 2 = 收班或在場站待命
-      const rk = paIndex[c + ':' + b.RouteID];
-      const w = rk && watched.get(rk);
-      if (!w) continue;
-      const lat = +b.Latitude, lon = +b.Longitude;
-      if (!lat || !lon) continue;
-      const id = c + ':' + b.CarID;
-      const dir = b.GoBack === '0' ? 0 : b.GoBack === '1' ? 1 : -1;
-      const cnt = (counts[rk] ??= [0, 0]);
-      if (dir >= 0) cnt[dir]++;
-      const bus = { id, rk, color: w.color, dir, plate: b.BusID, speed: +b.Speed || 0, az: +b.Azimuth, time: b.DataTime };
-      const key = `${w.color}|${dir}|${bus.az}`;
-      let m = markers.get(id);
-      if (!m) {
-        m = L.marker([lat, lon], { icon: busIcon(bus), riseOnHover: true }).addTo(busLayer);
-        m.bindPopup(() => popupHtml(m.bus), { autoPan: false });
-        markers.set(id, m);
-      } else {
-        m.setLatLng([lat, lon]);
-        if (m.iconKey !== key) m.setIcon(busIcon(bus));
+  function alertBox(title, message) {
+    return modal('<h3>' + esc(title) + '</h3><p>' + esc(message) + '</p>',
+      [{ label: '好', value: true, className: 'primary' }]);
+  }
+
+  function confirmBox(title, message, okLabel) {
+    return modal('<h3>' + esc(title) + '</h3><p>' + esc(message) + '</p>', [
+      { label: '返回', value: false },
+      { label: okLabel, value: true, className: 'danger' }
+    ]);
+  }
+
+  function setBusy(busy) {
+    state.busy = busy;
+    document.body.classList.toggle('busy', busy);
+  }
+
+  // ---------- 啟動 ----------
+
+  function fatal(message) {
+    $('loading').hidden = true;
+    $('tabs').hidden = true;
+    document.querySelectorAll('.tab').forEach(function (el) { el.hidden = true; });
+    $('fatalMsg').textContent = message;
+    $('fatal').hidden = false;
+  }
+
+  function handleError(e) {
+    if (e.code === 'AUTH' || e.code === 'CONFIG' || e.code === 'INTERNAL') return fatal(e.message);
+    return alertBox('無法完成', e.message);
+  }
+
+  async function start() {
+    if (!/^https:\/\/script\.google\.com\//.test(cfg.API_URL || '')) {
+      return fatal('尚未設定 API_URL(web/config.js)');
+    }
+    try {
+      if (!devUser) {
+        if (!window.liff) return fatal('LINE 元件載入失敗,請確認網路後重新開啟');
+        if (!cfg.LIFF_ID) return fatal('尚未設定 LIFF_ID(web/config.js)');
+        await liff.init({ liffId: cfg.LIFF_ID });
+        if (!liff.isLoggedIn()) {
+          liff.login({ redirectUri: location.href });
+          return;
+        }
       }
-      m.iconKey = key;
-      m.bus = bus;
-      if (m.isPopupOpen()) m.getPopup().update();
-      seen.add(id);
+      apply(await api('init'));
+      $('loading').hidden = true;
+      $('tabs').hidden = false;
+      $('footer').hidden = false;
+      showTab('book');
+    } catch (e) {
+      fatal(e.message || String(e));
     }
   }
-  for (const [id, m] of markers) {
-    if (!seen.has(id)) { busLayer.removeLayer(m); markers.delete(id); }
-  }
-  if (pendingFit) {
-    if (fitRoute(pendingFit, true)) pendingFit = null;
-  }
-}
 
-function fitRoute(k, quiet) {
-  const pts = [...markers.values()].filter((m) => m.bus.rk === k).map((m) => m.getLatLng());
-  if (!pts.length) {
-    if (!quiet) setStatus(`${routes[k]?.n ?? ''} 目前沒有營運中的車`, true);
-    return false;
+  $('fatalRetry').onclick = function () {
+    // LINE 以外的瀏覽器登入過期時,登出再重新整理會重新登入
+    if (!devUser && window.liff && liff.isLoggedIn && !liff.isInClient()) {
+      try { liff.logout(); } catch (e) { /* 還沒 init 成功時會丟錯,忽略 */ }
+    }
+    location.reload();
+  };
+
+  /** 把後端回傳的資料(init / book / cancel 的結果)併入 state 並重畫 */
+  function apply(data) {
+    var d = state.data = Object.assign(state.data || {}, data);
+    $('shopName').textContent = d.shopName;
+    $('tagline').textContent = d.tagline || '';
+    document.title = d.shopName + ' 線上預約';
+    $('adminTabBtn').hidden = !d.isAdmin;
+    $('proxyRow').hidden = !d.isAdmin;
+    $('blockedNotice').hidden = !d.blocked;
+    $('blockedNotice').textContent = d.blockedMessage || '';
+    $('bookArea').hidden = !!d.blocked;
+
+    var day = findDay(state.date);
+    if (!day || day.closed) {
+      day = d.days.filter(function (x) { return openCount(x) > 0; })[0] ||
+        d.days.filter(function (x) { return !x.closed; })[0];
+      state.date = day ? day.date : null;
+    }
+    var slot = day && day.slots.filter(function (s) { return s.time === state.time; })[0];
+    if (!slot || slot.status !== 'open') state.time = null;
+
+    renderDates();
+    renderSlots();
+    renderForm();
+    renderMine();
   }
-  // 扣掉面板蓋住的範圍:手機在下方,寬螢幕在左邊
-  const s = $('#sheet').getBoundingClientRect();
-  const wide = window.innerWidth >= 768;
-  map.fitBounds(L.latLngBounds(pts), {
-    paddingTopLeft: [wide ? s.right + 30 : 30, 60],
-    paddingBottomRight: [60, wide ? 30 : window.innerHeight - s.top + 30],
-    maxZoom: 15,
+
+  function findDay(date) {
+    return (state.data.days || []).filter(function (x) { return x.date === date; })[0];
+  }
+
+  function openCount(day) {
+    return day.slots.filter(function (s) { return s.status === 'open'; }).length;
+  }
+
+  // ---------- 分頁 ----------
+
+  function showTab(tab) {
+    state.tab = tab;
+    document.querySelectorAll('#tabs button').forEach(function (b) {
+      b.classList.toggle('active', b.dataset.tab === tab);
+    });
+    document.querySelectorAll('.tab').forEach(function (el) { el.hidden = el.id !== 'tab-' + tab; });
+    if (tab === 'admin') loadAdmin();
+    window.scrollTo(0, 0);
+  }
+
+  $('tabs').addEventListener('click', function (e) {
+    var b = e.target.closest('button[data-tab]');
+    if (b && !state.busy) showTab(b.dataset.tab);
   });
-  return true;
-}
 
-// 拉遠時只顯示圓點,不然路線名稱會疊成一團
-const syncZoomClass = () => map.getContainer().classList.toggle('zoom-far', map.getZoom() < 13);
-map.on('zoomend', syncZoomClass);
-syncZoomClass();
+  // ---------- 預約 ----------
 
-// ---------- 定時更新 ----------
-
-let pollTimer = null;
-let polling = false;
-let pollAgain = false;   // 更新途中加入了路線,結束後馬上再抓一次
-
-async function poll() {
-  clearTimeout(pollTimer);
-  if (polling) { pollAgain = true; return; }
-  if (document.hidden) return;   // 回到前景時 visibilitychange 會再呼叫
-  const cities = [...new Set(watch.map((w) => routes[w.k]?.c).filter(Boolean))];
-  if (!cities.length) {
-    lastData = {};
-    drawBuses();
-    renderWatch();
-    setStatus('');
-    return;
-  }
-  polling = true;
-  try {
-    const results = await Promise.allSettled(cities.map((c) => fetchGz(FEEDS[c].base + 'GetBusData.gz', true)));
-    results.forEach((r, i) => {
-      const c = cities[i];
-      if (r.status === 'fulfilled') {
-        lastData[c] = { at: Date.now(), rows: r.value.BusInfo };
-        delete lastErr[c];
-      } else {
-        lastErr[c] = r.reason?.message || String(r.reason);
+  function renderDates() {
+    var days = state.data.days;
+    if (!days.some(function (d) { return !d.closed; })) {
+      $('dates').innerHTML = '<p class="empty">近期沒有開放預約的日期</p>';
+      return;
+    }
+    $('dates').innerHTML = days.map(function (d) {
+      var p = d.date.split('-');
+      var md = '<span class="wd">週' + d.weekday + '</span>' +
+        '<span class="md">' + Number(p[1]) + '/' + Number(p[2]) + '</span>';
+      if (d.closed) {
+        // 休息日:保留選項但不能選,日期劃掉
+        return '<button type="button" class="date closed" disabled' +
+          (d.note ? ' title="' + esc(d.note) + '"' : '') + '>' + md +
+          '<span class="left">' + esc(d.reason) + '</span></button>';
       }
-    });
-    for (const c of Object.keys(lastData)) if (!cities.includes(c)) delete lastData[c];
-    drawBuses();
-    renderWatch();
-    const failed = cities.filter((c) => lastErr[c]);
-    if (failed.length) setStatus(`${failed.map((c) => FEEDS[c].name).join('、')}資料暫時抓不到,稍後自動重試`, true);
-    else setStatus(`${new Date().toLocaleTimeString('zh-TW', { hour12: false })} 更新`);
-  } finally {
-    polling = false;
+      var n = openCount(d);
+      return '<button type="button" class="date' + (d.date === state.date ? ' selected' : '') + (n ? '' : ' full') +
+        '" data-date="' + d.date + '">' + md +
+        '<span class="left">' + (n ? '剩 ' + n : '已滿') + '</span></button>';
+    }).join('');
+    var sel = $('dates').querySelector('.selected');
+    if (sel) sel.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }
-  if (pollAgain) { pollAgain = false; return poll(); }
-  pollTimer = setTimeout(poll, POLL_MS);
-}
 
-document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
+  $('dates').addEventListener('click', function (e) {
+    var b = e.target.closest('button[data-date]');
+    if (!b || b.disabled || state.busy) return;
+    state.date = b.dataset.date;
+    state.time = null;
+    renderDates();
+    renderSlots();
+    renderForm();
+  });
 
-function setStatus(msg, err) {
-  const el = $('#status');
-  el.hidden = !msg;
-  el.textContent = msg;
-  el.classList.toggle('err', !!err);
-}
-
-// ---------- 查看列表 ----------
-
-const svg = (d) => `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">${d}</svg>`;
-const ICON_FIT = svg('<circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2.5" fill="currentColor"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/>');
-const ICON_X = svg('<path d="M6 6l12 12M18 6L6 18"/>');
-
-function saveWatch() { LS.set('watch:v1', watch); }
-
-function addWatch(k) {
-  if (watch.some((w) => w.k === k)) return;
-  const used = new Set(watch.map((w) => w.color));
-  const color = PALETTE.find((c) => !used.has(c)) || PALETTE[watch.length % PALETTE.length];
-  watch.push({ k, color });
-  saveWatch();
-  pendingFit = k;
-  renderWatch();
-  renderResults();
-  loadStops().then(drawLines);
-  poll();
-}
-
-function removeWatch(k) {
-  watch = watch.filter((w) => w.k !== k);
-  saveWatch();
-  drawBuses();
-  drawLines();
-  renderWatch();
-  renderResults();
-}
-
-function renderWatch() {
-  const items = watch.filter((w) => routes[w.k]);
-  $('#watch').innerHTML = items.map((w) => {
-    const r = routes[w.k];
-    const [g, b] = counts[w.k] || [0, 0];
-    return `<li data-k="${esc(w.k)}" style="--c:${w.color}"><span class="sw"></span>`
-      + `<div class="info"><b>${esc(r.n)}</b><span class="tag">${FEEDS[r.c].name}</span>`
-      + `<small><i class="lg go"></i>${esc(dirText(r, 0))} ${g} 台</small>`
-      + `<small><i class="lg back"></i>${esc(dirText(r, 1))} ${b} 台</small></div>`
-      + `<button class="icon-btn" data-act="fit" title="在地圖上顯示" aria-label="在地圖上顯示">${ICON_FIT}</button>`
-      + `<button class="icon-btn" data-act="rm" title="移除" aria-label="移除">${ICON_X}</button></li>`;
-  }).join('');
-  syncHint();
-}
-
-function syncHint() {
-  const searching = !!$('#q').value.trim();
-  $('#watch-empty').hidden = searching || watch.some((w) => routes[w.k]);
-}
-
-$('#watch').addEventListener('click', (e) => {
-  const btn = e.target.closest('button');
-  const li = e.target.closest('li');
-  if (!li) return;
-  if (btn?.dataset.act === 'rm') return removeWatch(li.dataset.k);
-  if (window.innerWidth < 768) collapse(true);   // 先收合,地圖範圍才會算對
-  fitRoute(li.dataset.k);
-});
-
-// ---------- 搜尋 ----------
-
-const norm = (s) => (s || '').normalize('NFKC').toUpperCase().replace(/臺/g, '台').replace(/\s+/g, '');
-
-function search(q) {
-  q = norm(q);
-  if (!q) return [];
-  const res = [];
-  for (const r of routeList) {
-    const n = norm(r.n), e = norm(r.e);
-    let s = -1;
-    if (n === q || e === q) s = 0;
-    else if (n.startsWith(q) || e.startsWith(q)) s = 1;
-    else if (n.includes(q) || e.includes(q)) s = 2;
-    else if (norm(r.d).includes(q) || norm(r.t).includes(q)) s = 3;
-    if (s >= 0) res.push([s, n.length, r]);
+  function renderSlots() {
+    var day = findDay(state.date);
+    if (!day) {
+      $('slots').innerHTML = '';
+      return;
+    }
+    var label = { open: '可預約', taken: '已約滿', past: '已截止', full: '當日額滿' };
+    $('slots').innerHTML = day.slots.map(function (s) {
+      return '<button type="button" class="slot ' + s.status + (s.time === state.time ? ' selected' : '') +
+        '" data-time="' + s.time + '"' + (s.status === 'open' ? '' : ' disabled') + '>' +
+        '<span class="t">' + s.time + '</span><span class="s">' + label[s.status] + '</span></button>';
+    }).join('');
   }
-  res.sort((a, b) => a[0] - b[0] || a[1] - b[1] || a[2].n.localeCompare(b[2].n, 'zh-Hant'));
-  return res.slice(0, 40).map((x) => x[2]);
-}
 
-function renderResults() {
-  const q = $('#q').value;
-  const box = $('#results');
-  const searching = !!q.trim();
-  box.hidden = !searching;
-  $('#watch').hidden = searching;
-  syncHint();
-  if (!searching) return;
-  if (!routeList.length) { box.innerHTML = '<li class="hint">路線資料載入中…</li>'; return; }
-  const list = search(q);
-  if (!list.length) { box.innerHTML = '<li class="hint">找不到符合的路線</li>'; return; }
-  const added = new Set(watch.map((w) => w.k));
-  box.innerHTML = list.map((r) => `<li data-k="${esc(r.k)}"><div class="info"><b>${esc(r.n)}</b>`
-    + `<span class="tag">${FEEDS[r.c].name}</span><small>${esc(r.d)} ↔ ${esc(r.t)}</small>`
-    + `<small>${esc(r.p)}</small></div>`
-    + (added.has(r.k) ? '<button class="btn added" disabled>已加入</button>' : '<button class="btn" data-act="add">加入</button>')
-    + '</li>').join('');
-}
+  $('slots').addEventListener('click', function (e) {
+    var b = e.target.closest('button[data-time]');
+    if (!b || b.disabled || state.busy) return;
+    state.time = b.dataset.time;
+    renderSlots();
+    renderForm();
+    $('form').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
 
-$('#q').addEventListener('input', renderResults);
-$('#results').addEventListener('click', (e) => {
-  const btn = e.target.closest('button[data-act="add"]');
-  if (btn) addWatch(btn.closest('li').dataset.k);
-});
-
-// ---------- 面板 ----------
-
-function collapse(on) { $('#sheet').classList.toggle('collapsed', on); }
-$('#handle').addEventListener('click', () => collapse(!$('#sheet').classList.contains('collapsed')));
-$('#q').addEventListener('focus', () => collapse(false));
-
-document.querySelectorAll('.tabs button').forEach((b) => b.addEventListener('click', () => {
-  document.querySelectorAll('.tabs button').forEach((x) => x.setAttribute('aria-selected', String(x === b)));
-  $('#tab-watch').hidden = b.dataset.tab !== 'watch';
-  $('#tab-plan').hidden = b.dataset.tab !== 'plan';
-  collapse(false);
-}));
-
-// ---------- 啟動 ----------
-
-(async function start() {
-  if (typeof DecompressionStream === 'undefined') {
-    setStatus('瀏覽器版本太舊,請更新(iOS 16.4 以上)', true);
-    return;
+  function renderForm() {
+    var day = findDay(state.date);
+    $('form').hidden = !(day && state.time);
+    if ($('form').hidden) return;
+    $('picked').textContent = dateLabel(day.date, day.weekday) + ' ' + state.time;
+    if (!$('proxy').checked) {
+      if (!$('name').value) $('name').value = store('name') || state.data.displayName || '';
+      if (!$('phone').value) $('phone').value = store('phone');
+    }
   }
-  renderWatch();
-  try {
-    await loadRoutes();
-  } catch (e) {
-    setStatus('路線資料下載失敗,請重新整理', true);
-    return;
+
+  $('proxy').addEventListener('change', function () {
+    $('name').value = '';
+    $('phone').value = '';
+    renderForm();
+    $('name').focus();
+  });
+
+  $('form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    if (state.busy) return;
+    var name = $('name').value.trim();
+    var phone = $('phone').value.replace(/[\s-]/g, '');
+    var proxy = $('proxy').checked;
+    if (!name) return alertBox('請填寫姓名', '');
+    if (!/^0\d{8,9}$/.test(phone)) return alertBox('電話格式不正確', '請輸入手機(例:0912345678)或市話(例:0223456789)');
+
+    setBusy(true);
+    $('submitBtn').textContent = '預約中…';
+    try {
+      var r = await api('book', { date: state.date, time: state.time, name: name, phone: phone, proxy: proxy });
+      if (!proxy) {
+        store('name', name);
+        store('phone', phone);
+      } else {
+        $('proxy').checked = false;
+        $('name').value = '';
+        $('phone').value = '';
+      }
+      state.time = null;
+      apply(r);
+      var b = r.booking;
+      await modal(
+        '<div class="ok-mark">✓</div><h3>預約成功</h3>' +
+        '<p class="big">' + esc(dateLabel(b.date, b.weekday)) + ' ' + esc(b.time) + '</p>' +
+        '<p>' + esc(b.name) + ' · ' + esc(b.phone) + '</p>' +
+        (proxy ? '' : '<p class="muted">需要取消的話,到「我的預約」操作即可。</p>'),
+        [{ label: '好', value: true, className: 'primary' }]);
+      if (!proxy) showTab('mine');
+    } catch (err) {
+      await handleError(err);
+      if (err.code === 'TAKEN' || err.code === 'UNAVAILABLE') await refresh();
+    } finally {
+      $('submitBtn').textContent = '確認預約';
+      setBusy(false);
+    }
+  });
+
+  async function refresh() {
+    try { apply(await api('init')); } catch (e) { handleError(e); }
   }
-  watch = watch.filter((w) => routes[w.k]);   // 路線已停駛就移除
-  saveWatch();
-  renderWatch();
-  renderResults();
-  if (watch.length) loadStops();
-  poll();
+
+  // ---------- 我的預約 ----------
+
+  function renderMine() {
+    var d = state.data;
+    var mine = d.mine || [];
+    $('mineCount').hidden = !mine.length;
+    $('mineCount').textContent = mine.length;
+    $('cancelHint').textContent = mine.length
+      ? '距離預約時間 ' + d.cancelLimitMinutes + ' 分鐘內無法線上取消,請直接聯絡店家。'
+      : '';
+    if (!mine.length) {
+      $('mineList').innerHTML = '<p class="empty">目前沒有預約</p>';
+      return;
+    }
+    $('mineList').innerHTML = mine.map(function (b) {
+      return '<div class="card booking">' +
+        '<div><div class="when">' + esc(dateLabel(b.date, b.weekday)) + ' ' + esc(b.time) + '</div>' +
+        '<div class="who">' + esc(b.name) + ' · ' + esc(b.phone) + '</div></div>' +
+        '<button type="button" class="danger small" data-cancel="' + esc(b.id) + '">取消</button></div>';
+    }).join('');
+  }
+
+  $('mineList').addEventListener('click', async function (e) {
+    var btn = e.target.closest('button[data-cancel]');
+    if (!btn || state.busy) return;
+    var b = state.data.mine.filter(function (x) { return x.id === btn.dataset.cancel; })[0];
+    if (!b) return;
+    var ok = await confirmBox('確定要取消嗎?', dateLabel(b.date, b.weekday) + ' ' + b.time, '取消預約');
+    if (!ok) return;
+    setBusy(true);
+    try {
+      apply(await api('cancel', { id: b.id }));
+      await alertBox('已取消預約', dateLabel(b.date, b.weekday) + ' ' + b.time);
+    } catch (err) {
+      await handleError(err);
+    } finally {
+      setBusy(false);
+    }
+  });
+
+  // ---------- 老闆:預約總覽 ----------
+
+  async function loadAdmin() {
+    $('adminList').innerHTML = '<p class="empty">載入中…</p>';
+    try {
+      renderAdmin(await api('adminList'));
+    } catch (e) {
+      $('adminList').innerHTML = '';
+      handleError(e);
+    }
+  }
+
+  function renderAdmin(data) {
+    var groups = data.groups;
+    var total = groups.reduce(function (n, g) { return n + g.items.length; }, 0);
+    $('adminSummary').textContent = '今天起共 ' + total + ' 筆預約';
+    if (!groups.length) {
+      $('adminList').innerHTML = '<p class="empty">目前沒有預約</p>';
+      return;
+    }
+    $('adminList').innerHTML = groups.map(function (g) {
+      return '<h3 class="group">' + esc(dateLabel(g.date, g.weekday)) + '<span>' + g.items.length + ' 位</span></h3>' +
+        g.items.map(function (b) {
+          var label = esc(dateLabel(g.date, g.weekday) + ' ' + b.time + ' ' + b.name);
+          return '<div class="card booking">' +
+            '<div class="time">' + esc(b.time) + '</div>' +
+            '<div class="grow"><div class="who-name">' + esc(b.name) +
+            (b.byShop ? ' <span class="tag">代訂</span>' : '') +
+            (b.blocked ? ' <span class="tag bad">黑名單</span>' : '') + '</div>' +
+            '<a class="tel" href="tel:' + esc(b.phone) + '">' + esc(b.phone) + '</a></div>' +
+            '<div class="actions">' +
+            '<button type="button" class="danger small" data-act="cancel" data-id="' + esc(b.id) + '" data-label="' +
+            label + '">取消</button>' +
+            '<button type="button" class="ghost small" data-act="' + (b.blocked ? 'unblock' : 'block') +
+            '" data-id="' + esc(b.id) + '" data-label="' + label + '">' + (b.blocked ? '解除封鎖' : '黑名單') + '</button>' +
+            '</div></div>';
+        }).join('');
+    }).join('');
+  }
+
+  $('adminRefresh').onclick = function () { if (!state.busy) loadAdmin(); };
+
+  $('adminList').addEventListener('click', async function (e) {
+    var btn = e.target.closest('button[data-act]');
+    if (!btn || state.busy) return;
+    var act = btn.dataset.act;
+    var dialogs = {
+      cancel: ['取消這筆預約?', btn.dataset.label + '\n客人會收到取消通知(若有開啟客人通知)。', '取消預約', 'adminCancel'],
+      block: ['加入黑名單?', btn.dataset.label + '\n這位客人(LINE 帳號和電話)之後就不能線上預約。已經約好的預約不會自動取消。', '加入黑名單', 'adminBlock'],
+      unblock: ['解除封鎖?', btn.dataset.label + '\n解除後這位客人又可以線上預約。', '解除封鎖', 'adminUnblock']
+    };
+    var d = dialogs[act];
+    var ok = await confirmBox(d[0], d[1], d[2]);
+    if (!ok) return;
+    setBusy(true);
+    try {
+      renderAdmin(await api(d[3], { id: btn.dataset.id }));
+      if (act === 'cancel') await refresh();
+    } catch (err) {
+      await handleError(err);
+    } finally {
+      setBusy(false);
+    }
+  });
+
+  // ---------- 顯示 LINE ID(設定老闆帳號用) ----------
+
+  $('showId').onclick = function () {
+    $('myId').textContent = state.data ? state.data.userId : '';
+    $('myId').hidden = !$('myId').hidden;
+  };
+
+  start();
 })();
