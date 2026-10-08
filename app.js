@@ -97,19 +97,60 @@ map.on('baselayerchange', (e) => LS.set('base:v1', e.name));
 L.control.zoom({ position: 'topright' }).addTo(map);
 map.on('moveend', () => { const c = map.getCenter(); LS.set('view:v1', { c: [c.lat, c.lng], z: map.getZoom() }); });
 
-// 路線線條與站牌(data/bus_stops.json,由 build_static.py 從 TDX 產生;沒有這個檔案就只顯示車)
+// 路線線條與站牌(data/bus_stops.json、shapes.json,由 build_static.py 從 TDX 產生;沒有這些檔案就只顯示車)
 const canvas = L.canvas({ padding: 0.5 });
 const lineLayer = L.layerGroup().addTo(map);
 const stopLayer = L.layerGroup();
 let stopData = null;
+let shapeData = null;
 let stopDataPromise = null;
 
 function loadStops() {
-  stopDataPromise ??= fetch('data/bus_stops.json')
-    .then((r) => (r.ok ? r.json() : null))
-    .catch(() => null)
-    .then((d) => { stopData = d; drawLines(); });
+  const get = (u) => fetch(u).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+  stopDataPromise ??= Promise.all([get('data/bus_stops.json'), get('data/shapes.json')])
+    .then(([d, s]) => { stopData = d; shapeData = s; drawLines(); });
   return stopDataPromise;
+}
+
+/** Google encoded polyline → [[緯度, 經度], ...] */
+function decodePolyline(s) {
+  const pts = [];
+  let i = 0, lat = 0, lon = 0;
+  while (i < s.length) {
+    for (let k = 0; k < 2; k++) {
+      let b, shift = 0, v = 0;
+      do { b = s.charCodeAt(i++) - 63; v |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20);
+      const d = v & 1 ? ~(v >> 1) : v >> 1;
+      if (k === 0) lat += d; else lon += d;
+    }
+    pts.push([lat / 1e5, lon / 1e5]);
+  }
+  return pts;
+}
+
+/** 公車實際行駛的軌跡:{ pts: [[緯度, 經度], ...], ix: 第 i 站在軌跡的第幾段 };沒有軌跡回傳 null */
+const shapeCache = new Map();
+function shapeOf(rk, d) {
+  const key = rk + '|' + d;
+  if (shapeCache.has(key)) return shapeCache.get(key);
+  const e = shapeData?.s?.[rk]?.[d];
+  const sh = e && e.length ? { pts: decodePolyline(e[0]), ix: e[1] } : null;
+  shapeCache.set(key, sh);
+  return sh;
+}
+
+/** 第 i 站到第 j 站之間沿著軌跡的線(a、b 是兩站的 [緯度, 經度]) */
+function shapeSlice(sh, i, j, a, b) {
+  const proj = (p, s) => {   // p 投影到第 s 段上
+    const [y1, x1] = sh.pts[s], [y2, x2] = sh.pts[s + 1];
+    const k = Math.cos(y1 * Math.PI / 180);
+    const dx = (x2 - x1) * k, dy = y2 - y1;
+    const L2 = dx * dx + dy * dy;
+    const t = L2 ? Math.max(0, Math.min(1, (((p[1] - x1) * k) * dx + (p[0] - y1) * dy) / L2)) : 0;
+    return [y1 + t * dy, x1 + t * (x2 - x1)];
+  };
+  const si = sh.ix[i], sj = sh.ix[j];
+  return [proj(a, si), ...sh.pts.slice(si + 1, sj + 1), proj(b, sj)];
 }
 
 function drawLines() {
@@ -123,9 +164,10 @@ function drawLines() {
     ln.forEach((ids, d) => {
       const pts = ids.map((id) => stopData.stops[r.c + ':' + id]).filter(Boolean);
       if (pts.length < 2) return;
-      // 站和站之間畫直線(不是沿著道路),實線是去程、虛線是返程
-      L.polyline(pts.map((p) => [p[2], p[1]]), {
-        renderer: canvas, color: w.color, weight: 4, opacity: 0.5, dashArray: d ? '6 8' : null, interactive: false,
+      // 沿著公車實際行駛的軌跡畫(沒有軌跡就把站連成直線),實線是去程、虛線是返程
+      const sh = shapeOf(w.k, d);
+      L.polyline(sh ? sh.pts : pts.map((p) => [p[2], p[1]]), {
+        renderer: canvas, color: w.color, weight: 5, opacity: 0.85, dashArray: d ? '8 7' : null, interactive: false,
       }).addTo(lineLayer);
       for (const p of pts) {
         L.circleMarker([p[2], p[1]], { renderer: canvas, radius: 4, color: w.color, weight: 2, fillColor: '#fff', fillOpacity: 1 })

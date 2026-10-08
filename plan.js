@@ -819,7 +819,11 @@ function drawJourney(j, fit = true) {
       pts.push(...line);
       continue;
     }
-    const line = l.pat.stops.slice(l.bpos, l.apos + 1).map((s) => [PL.lat[s], PL.lon[s]]);
+    const straight = l.pat.stops.slice(l.bpos, l.apos + 1).map((s) => [PL.lat[s], PL.lon[s]]);
+    // 公車沿著實際行駛的軌跡畫上車到下車那一段;捷運和沒有軌跡的公車把站連起來
+    const sh = l.type === 'bus' ? shapeOf(l.pat.rk, l.pat.d) : null;
+    const line = sh && sh.ix.length === l.pat.stops.length
+      ? shapeSlice(sh, l.bpos, l.apos, straight[0], straight[straight.length - 1]) : straight;
     const c = legColor(l);
     L.polyline(line, { color: '#fff', weight: 9, opacity: 0.9 }).addTo(planLayer);
     L.polyline(line, { color: c, weight: 6 }).addTo(planLayer);
