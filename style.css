@@ -125,11 +125,62 @@ button { font: inherit; color: inherit; }
 }
 .bus.back .lbl { background: #fff; color: var(--c); box-shadow: inset 0 0 0 1.5px var(--c), 0 1px 3px rgba(0, 0, 0, .35); }
 .zoom-far .bus .lbl { display: none; }
+.zoom-far .bus.mine .lbl { display: block; }   /* 轉乘規劃中要搭的車:拉遠也顯示 */
 
 .me { width: 16px; height: 16px; border-radius: 50%; background: #1a73e8; border: 3px solid #fff; box-shadow: 0 0 0 6px rgba(26, 115, 232, .25); }
 .leaflet-bar a.locate { font-size: 18px; line-height: 30px; }
 .pop { font-size: 14px; line-height: 1.6; }
 .pop .muted { color: #667085; font-size: 12px; }
+
+/* 轉乘規劃 */
+.od { display: flex; align-items: center; gap: 8px; }
+.od-fields { flex: 1; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.od-row { display: flex; align-items: center; gap: 8px; }
+.od-row .search { padding: 8px 10px; }
+.pin { flex: none; width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
+.pin.o { background: #2a8a2a; box-shadow: 0 0 0 3px rgba(42, 138, 42, .25); }
+.pin.d { background: #d62728; box-shadow: 0 0 0 3px rgba(214, 39, 40, .25); }
+.pin-mk { position: absolute; left: -9px; top: -9px; width: 18px; height: 18px; border-radius: 50%; border: 3px solid #fff; box-shadow: 0 1px 4px rgba(0, 0, 0, .5); }
+.pin-mk.o { background: #2a8a2a; }
+.pin-mk.d { background: #d62728; }
+.list li .ic { flex: none; width: 22px; display: flex; justify-content: center; color: var(--muted); }
+
+.plan { flex-direction: column; align-items: stretch !important; gap: 4px !important; cursor: pointer; }
+.pl-top { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; }
+.pl-top b { font-size: 20px; }
+.dur { color: var(--muted); font-size: 14px; }
+.pl-legs { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.pl-sub { color: var(--muted); font-size: 13px; }
+.sep { color: var(--muted); font-style: normal; }
+.wk { display: inline-flex; align-items: center; gap: 1px; color: var(--muted); font-size: 13px; }
+.chip {
+  display: inline-flex; align-items: center; gap: 3px; padding: 1px 7px 1px 5px; border-radius: 6px;
+  background: var(--c); color: #fff; font-size: 13px; font-weight: 600; white-space: nowrap;
+}
+.prob { font-size: 12px; padding: 0 6px; border-radius: 9px; font-weight: 600; margin-left: 2px; }
+.prob.ok { background: #e3f4e5; color: #1e6b2a; }
+.prob.warn { background: #fff3d6; color: #8a5a00; }
+.prob.bad { background: #fde4e4; color: #b42318; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .prob.ok { background: #1d3a24; color: #8fe0a0; }
+  :root:not([data-theme="light"]) .prob.warn { background: #3d3115; color: #f5c96a; }
+  :root:not([data-theme="light"]) .prob.bad { background: #451d1d; color: #ff9b94; }
+}
+
+#plan-detail { padding-bottom: 6px; }
+.back { border: 0; background: none; color: var(--accent); padding: 6px 0; cursor: pointer; font-weight: 600; }
+.steps { list-style: none; margin: 4px 0 0; padding: 0; }
+.steps .st { display: grid; grid-template-columns: 44px 22px 1fr; gap: 6px; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+.steps .st:last-child { border-bottom: 0; }
+.steps .tm { font-weight: 600; font-variant-numeric: tabular-nums; }
+.steps .ic { color: var(--muted); padding-top: 1px; }
+.steps .ride .ic { color: var(--c); }
+.steps small { color: var(--muted); }
+.steps .pin { margin: 4px 0 0 5px; }
+
+.pick { display: flex; gap: 6px; }
+.pick button { border: 1px solid var(--accent); color: var(--accent); background: #fff; border-radius: 8px; padding: 6px 10px; cursor: pointer; font-size: 14px; }
+.pick-pop .leaflet-popup-content { margin: 8px; }
 
 /* 寬螢幕:面板放左邊 */
 @media (min-width: 768px) {

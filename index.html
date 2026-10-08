@@ -34,11 +34,22 @@
   </div>
 
   <div id="tab-plan" class="tab" hidden>
-    <p class="hint">轉乘規劃需要先累積約一週的公車行駛資料來推算車速,之後的版本會加上。</p>
+    <div class="od">
+      <div class="od-fields">
+        <label class="od-row"><i class="pin o"></i><input id="from" class="search" type="search" placeholder="起點:目前位置、站名或地址" autocomplete="off" enterkeyhint="search"></label>
+        <label class="od-row"><i class="pin d"></i><input id="to" class="search" type="search" placeholder="終點:站名、地標、地址,或點地圖" autocomplete="off" enterkeyhint="search"></label>
+      </div>
+      <button id="swap" class="icon-btn" title="起點終點交換" aria-label="起點終點交換"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4v16M7 4 3 8M7 4l4 4M17 20V4M17 20l-4-4M17 20l4-4"/></svg></button>
+    </div>
+    <ul id="places" class="list" hidden></ul>
+    <p id="plan-msg" class="hint" hidden></p>
+    <ul id="plans" class="list"></ul>
+    <div id="plan-detail" class="list" hidden></div>
   </div>
 </section>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
 <script src="app.js"></script>
+<script src="plan.js"></script>
 </body>
 </html>

@@ -40,7 +40,7 @@ async function fetchGz(url, fresh) {
 }
 
 async function loadRoutes() {
-  const cached = LS.get('routes:v1', null);
+  const cached = LS.get('routes:v2', null);
   if (cached && Date.now() - cached.t < ROUTE_CACHE_MS) return setRoutes(cached.r);
   const out = [];
   const results = await Promise.allSettled(Object.keys(FEEDS).map(async (city) => {
@@ -48,7 +48,13 @@ async function loadRoutes() {
     const by = {};
     for (const r of j.BusInfo) {
       const k = city + ':' + r.Id;
-      by[k] ??= { k, c: city, n: r.nameZh, e: r.nameEn || '', d: r.departureZh || '', t: r.destinationZh || '', p: r.providerName || '', pa: [] };
+      // s:首末班 [去程首班, 去程末班, 返程首班, 返程末班](平日、假日);h:班距 [尖峰, 離峰](平日、假日),'0510' = 5~10 分
+      by[k] ??= {
+        k, c: city, n: r.nameZh, e: r.nameEn || '', d: r.departureZh || '', t: r.destinationZh || '', p: r.providerName || '', pa: [],
+        s: [[r.goFirstBusTime, r.goLastBusTime, r.backFirstBusTime, r.backLastBusTime],
+          [r.holidayGoFirstBusTime, r.holidayGoLastBusTime, r.holidayBackFirstBusTime, r.holidayBackLastBusTime]],
+        h: [[r.peakHeadway, r.offPeakHeadway], [r.holidayPeakHeadway, r.holidayOffPeakHeadway]],
+      };
       by[k].pa.push(r.pathAttributeId);
     }
     out.push(...Object.values(by));
@@ -59,7 +65,7 @@ async function loadRoutes() {
     throw new Error('路線資料下載失敗');
   }
   setRoutes(out);
-  if (ok) LS.set('routes:v1', { t: Date.now(), r: out });
+  if (ok) LS.set('routes:v2', { t: Date.now(), r: out });
 }
 
 function setRoutes(list) {
@@ -256,7 +262,9 @@ async function poll() {
   clearTimeout(pollTimer);
   if (polling) { pollAgain = true; return; }
   if (document.hidden) return;   // 回到前景時 visibilitychange 會再呼叫
-  const cities = [...new Set(watch.map((w) => routes[w.k]?.c).filter(Boolean))];
+  // 查看列表的路線 + 轉乘規劃選中的方案要搭的公車(plan.js 的 planCities)
+  const extra = typeof planCities === 'function' ? planCities() : [];
+  const cities = [...new Set([...watch.map((w) => routes[w.k]?.c), ...extra].filter(Boolean))];
   if (!cities.length) {
     lastData = {};
     drawBuses();
@@ -279,6 +287,7 @@ async function poll() {
     for (const c of Object.keys(lastData)) if (!cities.includes(c)) delete lastData[c];
     drawBuses();
     renderWatch();
+    if (typeof onBusData === 'function') onBusData();
     const failed = cities.filter((c) => lastErr[c]);
     if (failed.length) setStatus(`${failed.map((c) => FEEDS[c].name).join('、')}資料暫時抓不到,稍後自動重試`, true);
     else setStatus(`${new Date().toLocaleTimeString('zh-TW', { hour12: false })} 更新`);
@@ -414,6 +423,7 @@ document.querySelectorAll('.tabs button').forEach((b) => b.addEventListener('cli
   $('#tab-watch').hidden = b.dataset.tab !== 'watch';
   $('#tab-plan').hidden = b.dataset.tab !== 'plan';
   collapse(false);
+  if (typeof onPlanTab === 'function') onPlanTab(b.dataset.tab === 'plan');
 }));
 
 // ---------- 啟動 ----------
