@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>雙北轉乘</title>
+<meta name="theme-color" content="#1f62b4">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="雙北轉乘">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon.svg">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="map"></div>
+<div id="status" class="status" hidden></div>
+
+<section id="sheet" class="sheet">
+  <button id="handle" class="handle" aria-label="展開或收合"><span></span></button>
+  <nav class="tabs" role="tablist">
+    <button role="tab" data-tab="watch" aria-selected="true">查看列表</button>
+    <button role="tab" data-tab="plan" aria-selected="false">規劃路線</button>
+  </nav>
+
+  <div id="tab-watch" class="tab">
+    <input id="q" class="search" type="search" placeholder="搜尋公車路線,例如 307、紅30、藍38" autocomplete="off" enterkeyhint="search">
+    <ul id="results" class="list" hidden></ul>
+    <ul id="watch" class="list"></ul>
+    <p id="watch-empty" class="hint">搜尋路線後按「加入」,地圖上就會顯示這條路線去程和返程的車。<br>
+      <span class="legend"><i class="lg go"></i>實心:去程　<i class="lg back"></i>空心:返程　箭頭是行駛方向</span></p>
+  </div>
+
+  <div id="tab-plan" class="tab" hidden>
+    <p class="hint">轉乘規劃需要先累積約一週的公車行駛資料來推算車速,之後的版本會加上。</p>
+  </div>
+</section>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
