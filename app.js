@@ -231,8 +231,24 @@ function popupHtml(bus) {
     + `<span class="muted">${esc(bus.time.slice(11))}(${age} 秒前)・${esc(r.p)}</span></div>`;
 }
 
+/** 地圖上要顯示車子的路線:查看列表 + 正在看的路線頁(bus.js) */
+function mapRoutes() {
+  const f = window.BusUI?.focus();
+  return f && !watch.some((w) => w.k === f.k) ? [...watch, f] : watch;
+}
+
+/** fitBounds 的留白:扣掉面板蓋住的範圍(手機在下方,寬螢幕在左邊) */
+function sheetPadding() {
+  const s = $('#sheet').getBoundingClientRect();
+  const wide = window.innerWidth >= 768;
+  return {
+    paddingTopLeft: [wide ? s.right + 30 : 30, 60],
+    paddingBottomRight: [60, wide ? 30 : window.innerHeight - s.top + 30],
+  };
+}
+
 function drawBuses() {
-  const watched = new Map(watch.map((w) => [w.k, w]));
+  const watched = new Map(mapRoutes().map((w) => [w.k, w]));
   const seen = new Set();
   counts = {};
   for (const [c, d] of Object.entries(lastData)) {
@@ -278,14 +294,7 @@ function fitRoute(k, quiet) {
     if (!quiet) setStatus(`${routes[k]?.n ?? ''} 目前沒有營運中的車`, true);
     return false;
   }
-  // 扣掉面板蓋住的範圍:手機在下方,寬螢幕在左邊
-  const s = $('#sheet').getBoundingClientRect();
-  const wide = window.innerWidth >= 768;
-  map.fitBounds(L.latLngBounds(pts), {
-    paddingTopLeft: [wide ? s.right + 30 : 30, 60],
-    paddingBottomRight: [60, wide ? 30 : window.innerHeight - s.top + 30],
-    maxZoom: 15,
-  });
+  map.fitBounds(L.latLngBounds(pts), { ...sheetPadding(), maxZoom: 15 });
   return true;
 }
 
@@ -304,9 +313,9 @@ async function poll() {
   clearTimeout(pollTimer);
   if (polling) { pollAgain = true; return; }
   if (document.hidden) return;   // 回到前景時 visibilitychange 會再呼叫
-  // 查看列表的路線 + 轉乘規劃選中的方案要搭的公車(plan.js 的 planCities)
+  // 查看列表和路線頁的路線 + 轉乘規劃選中的方案要搭的公車(plan.js 的 planCities)
   const extra = typeof planCities === 'function' ? planCities() : [];
-  const cities = [...new Set([...watch.map((w) => routes[w.k]?.c), ...extra].filter(Boolean))];
+  const cities = [...new Set([...mapRoutes().map((w) => routes[w.k]?.c), ...extra].filter(Boolean))];
   if (!cities.length) {
     lastData = {};
     drawBuses();
@@ -366,6 +375,7 @@ function addWatch(k) {
   pendingFit = k;
   renderWatch();
   renderResults();
+  window.BusUI?.render();
   loadStops().then(drawLines);
   poll();
 }
@@ -377,14 +387,16 @@ function removeWatch(k) {
   drawLines();
   renderWatch();
   renderResults();
+  window.BusUI?.render();
 }
 
 function renderWatch() {
   const items = watch.filter((w) => routes[w.k]);
+  $('#watch-box').hidden = !items.length;
   $('#watch').innerHTML = items.map((w) => {
     const r = routes[w.k];
     const [g, b] = counts[w.k] || [0, 0];
-    return `<li data-k="${esc(w.k)}" style="--c:${w.color}"><span class="sw"></span>`
+    return `<li class="tap" data-k="${esc(w.k)}" style="--c:${w.color}"><span class="sw"></span>`
       + `<div class="info"><b>${esc(r.n)}</b><span class="tag">${FEEDS[r.c].name}</span>`
       + `<small><i class="lg go"></i>${esc(dirText(r, 0))} ${g} 台</small>`
       + `<small><i class="lg back"></i>${esc(dirText(r, 1))} ${b} 台</small></div>`
@@ -395,8 +407,7 @@ function renderWatch() {
 }
 
 function syncHint() {
-  const searching = !!$('#q').value.trim();
-  $('#watch-empty').hidden = searching || watch.some((w) => routes[w.k]);
+  $('#watch-empty').hidden = watch.some((w) => routes[w.k]) || !!window.BusUI?.favCount();
 }
 
 $('#watch').addEventListener('click', (e) => {
@@ -404,8 +415,11 @@ $('#watch').addEventListener('click', (e) => {
   const li = e.target.closest('li');
   if (!li) return;
   if (btn?.dataset.act === 'rm') return removeWatch(li.dataset.k);
-  if (window.innerWidth < 768) collapse(true);   // 先收合,地圖範圍才會算對
-  fitRoute(li.dataset.k);
+  if (btn?.dataset.act === 'fit') {
+    if (window.innerWidth < 768) collapse(true);   // 先收合,地圖範圍才會算對
+    return fitRoute(li.dataset.k);
+  }
+  window.BusUI?.openRoute(li.dataset.k);
 });
 
 // ---------- 搜尋 ----------
@@ -434,37 +448,80 @@ function renderResults() {
   const box = $('#results');
   const searching = !!q.trim();
   box.hidden = !searching;
-  $('#watch').hidden = searching;
-  syncHint();
+  $('#home').hidden = searching;
   if (!searching) return;
   if (!routeList.length) { box.innerHTML = '<li class="hint">路線資料載入中…</li>'; return; }
   const list = search(q);
   if (!list.length) { box.innerHTML = '<li class="hint">找不到符合的路線</li>'; return; }
   const added = new Set(watch.map((w) => w.k));
-  box.innerHTML = list.map((r) => `<li data-k="${esc(r.k)}"><div class="info"><b>${esc(r.n)}</b>`
+  box.innerHTML = list.map((r) => `<li class="tap" data-k="${esc(r.k)}"><div class="info"><b>${esc(r.n)}</b>`
     + `<span class="tag">${FEEDS[r.c].name}</span><small>${esc(r.d)} ↔ ${esc(r.t)}</small>`
     + `<small>${esc(r.p)}</small></div>`
     + (added.has(r.k) ? '<button class="btn added" disabled>已加入</button>' : '<button class="btn" data-act="add">加入</button>')
-    + '</li>').join('');
+    + '<span class="chev" aria-hidden="true">›</span></li>').join('');
 }
 
 $('#q').addEventListener('input', renderResults);
 $('#results').addEventListener('click', (e) => {
-  const btn = e.target.closest('button[data-act="add"]');
-  if (btn) addWatch(btn.closest('li').dataset.k);
+  const li = e.target.closest('li[data-k]');
+  if (!li) return;
+  if (e.target.closest('button[data-act="add"]')) return addWatch(li.dataset.k);
+  if (!e.target.closest('button')) window.BusUI?.openRoute(li.dataset.k);
 });
 
 // ---------- 面板 ----------
 
-function collapse(on) { $('#sheet').classList.toggle('collapsed', on); }
-$('#handle').addEventListener('click', () => collapse(!$('#sheet').classList.contains('collapsed')));
+const sheet = $('#sheet');
+function collapse(on) {
+  sheet.classList.toggle('collapsed', on);
+  if (on) sheet.classList.remove('full');
+}
+
+// 手機:拖曳把手調整面板高度(收合 / 一半 / 接近全螢幕),點一下收合或展開
+(function dragSheet() {
+  const handle = $('#handle');
+  let y0 = null, h0 = 0, moved = false;
+  handle.addEventListener('pointerdown', (e) => {
+    if (window.innerWidth >= 768) return;
+    y0 = e.clientY;
+    h0 = sheet.getBoundingClientRect().height;
+    moved = false;
+    handle.setPointerCapture(e.pointerId);
+  });
+  handle.addEventListener('pointermove', (e) => {
+    if (y0 === null) return;
+    const dy = e.clientY - y0;
+    if (!moved && Math.abs(dy) < 6) return;
+    if (!moved) { moved = true; sheet.classList.add('dragging'); sheet.classList.remove('collapsed'); }
+    const h = Math.max(80, Math.min(window.innerHeight - 40, h0 - dy));
+    sheet.style.height = sheet.style.maxHeight = h + 'px';
+  });
+  const end = () => {
+    if (y0 === null) return;
+    y0 = null;
+    sheet.classList.remove('dragging');
+    if (!moved) return collapse(!sheet.classList.contains('collapsed'));
+    const f = sheet.getBoundingClientRect().height / window.innerHeight;
+    sheet.style.height = sheet.style.maxHeight = '';
+    if (f < 0.3) collapse(true);
+    else sheet.classList.toggle('full', f > 0.7);
+  };
+  handle.addEventListener('pointerup', end);
+  handle.addEventListener('pointercancel', end);
+})();
 $('#q').addEventListener('focus', () => collapse(false));
 
+let currentTab = 'watch';
+function showTab(name) {
+  currentTab = name;
+  document.querySelectorAll('.tabs button').forEach((x) => x.setAttribute('aria-selected', String(x.dataset.tab === name)));
+  for (const t of ['watch', 'near', 'plan']) $('#tab-' + t).hidden = t !== name;
+  $('#tab-route').hidden = true;   // 路線頁(bus.js)蓋在分頁上面,換分頁就關掉
+}
 document.querySelectorAll('.tabs button').forEach((b) => b.addEventListener('click', () => {
-  document.querySelectorAll('.tabs button').forEach((x) => x.setAttribute('aria-selected', String(x === b)));
-  $('#tab-watch').hidden = b.dataset.tab !== 'watch';
-  $('#tab-plan').hidden = b.dataset.tab !== 'plan';
+  showTab(b.dataset.tab);
   collapse(false);
+  window.BusUI?.onTab(b.dataset.tab);
   if (typeof onPlanTab === 'function') onPlanTab(b.dataset.tab === 'plan');
 }));
 
@@ -486,6 +543,7 @@ document.querySelectorAll('.tabs button').forEach((b) => b.addEventListener('cli
   saveWatch();
   renderWatch();
   renderResults();
+  window.BusUI?.start();
   if (watch.length) loadStops();
   poll();
 })();
