@@ -3,89 +3,42 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>雙北轉乘</title>
-<meta name="theme-color" content="#1f62b4">
+<title>台北捷運動態</title>
+<meta name="theme-color" content="#0a59ae">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="雙北轉乘">
+<meta name="apple-mobile-web-app-title" content="捷運動態">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icon.svg">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
-<link rel="stylesheet" href="style.css?v=20261008">
+<link rel="stylesheet" href="style.css?v=20261009m">
 </head>
 <body>
 <div id="map"></div>
-<div id="status" class="status" hidden></div>
 
-<section id="sheet" class="sheet">
-  <button id="handle" class="handle" aria-label="展開或收合"><span></span></button>
-  <nav class="tabs" role="tablist">
-    <button role="tab" data-tab="watch" aria-selected="true">公車</button>
-    <button role="tab" data-tab="near" aria-selected="false">附近站牌</button>
-    <button role="tab" data-tab="plan" aria-selected="false">規劃路線</button>
-  </nav>
-
-  <div id="tab-watch" class="tab">
-    <input id="q" class="search" type="search" placeholder="搜尋公車路線,例如 307、紅30、藍38" autocomplete="off" enterkeyhint="search">
-    <ul id="results" class="list" hidden></ul>
-    <div id="home" class="scroll">
-      <section id="favs-box" hidden>
-        <h3 class="sec">常用站牌<span id="favs-upd" class="sec-note"></span><button id="favs-edit" class="link">編輯</button></h3>
-        <ul id="favs" class="list"></ul>
-      </section>
-      <section id="watch-box" hidden>
-        <h3 class="sec">地圖上的路線</h3>
-        <ul id="watch" class="list"></ul>
-      </section>
-      <p id="watch-empty" class="hint">搜尋路線,點進去就能看到每一站的預估到站時間和公車位置。<br>
-        在站牌旁按 ☆ 加入「常用站牌」,下次打開首頁就看得到。<br>
-        按「加入」會讓這條路線的車一直顯示在地圖上:
-        <span class="legend"><i class="lg go"></i>實心:去程　<i class="lg back"></i>空心:返程　箭頭是行駛方向</span></p>
-    </div>
+<header class="bar">
+  <div class="title">
+    <b>台北捷運動態</b>
+    <span class="sub"><span id="clock">--:--:--</span>・<span id="count">載入中…</span></span>
   </div>
+  <span class="mode">依時刻表推算</span>
+  <button id="info-btn" class="info-btn" aria-label="說明">i</button>
+</header>
 
-  <div id="tab-near" class="tab" hidden>
-    <div class="near-bar">
-      <span id="near-where" class="near-where"></span>
-      <button id="near-gps" class="btn sm">重新定位</button>
-      <button id="near-center" class="btn sm">用地圖中心</button>
-    </div>
-    <p id="near-upd" class="upd"></p>
-    <p id="near-msg" class="hint" hidden></p>
-    <div id="near" class="scroll"></div>
-  </div>
+<div id="about" class="about" hidden>
+  <button class="x" aria-label="關閉">✕</button>
+  <b>說明</b>
+  <p>列車位置是<b>依時刻表推算</b>的,不是即時資料:用各站的發車時刻和站間行駛時間,算出每一班車現在大約在哪兩站之間。台北捷運平常很準點,但誤點、臨時調度、國定假日(照星期幾的時刻表)不會反映。文湖線沒有公開的時刻表,只能依班距推估,位置僅供參考。</p>
+  <p>點車站看各方向接下來的列車,點列車看它開往哪裡、下一站和預計抵達終點的時間。下方的路線可以點選,只看那一條線。</p>
+  <p>時刻表來源:交通部 TDX 運輸資料流通服務。路線圖是自己畫的示意圖,不是官方路網圖。</p>
+</div>
 
-  <div id="tab-route" class="tab" hidden>
-    <div class="rt-head">
-      <button id="rt-back" class="icon-btn" aria-label="返回"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg></button>
-      <div class="rt-title"><b id="rt-name"></b><span id="rt-city" class="tag"></span><small id="rt-sub"></small></div>
-      <button id="rt-pin" class="btn sm">加入地圖</button>
-    </div>
-    <div id="rt-dirs" class="seg" role="tablist"></div>
-    <p id="rt-upd" class="upd"></p>
-    <ol id="rt-stops" class="stops"></ol>
-  </div>
-
-  <div id="tab-plan" class="tab" hidden>
-    <div class="od">
-      <div class="od-fields">
-        <label class="od-row"><i class="pin o"></i><input id="from" class="search" type="search" placeholder="起點:目前位置、站名或地址" autocomplete="off" enterkeyhint="search"></label>
-        <label class="od-row"><i class="pin d"></i><input id="to" class="search" type="search" placeholder="終點:站名、地標、地址,或點地圖" autocomplete="off" enterkeyhint="search"></label>
-      </div>
-      <button id="swap" class="icon-btn" title="起點終點交換" aria-label="起點終點交換"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4v16M7 4 3 8M7 4l4 4M17 20V4M17 20l-4-4M17 20l4-4"/></svg></button>
-    </div>
-    <ul id="places" class="list" hidden></ul>
-    <p id="plan-msg" class="hint" hidden></p>
-    <ul id="plans" class="list"></ul>
-    <div id="plan-detail" class="list" hidden></div>
-  </div>
-</section>
+<div id="card" class="card" hidden></div>
+<nav id="legend" class="legend" aria-label="路線"></nav>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
-<!-- 改了 js/css 要一起改 ?v=,否則 GitHub Pages 的快取可能讓新的 index.html 配到舊的 js -->
-<script src="app.js?v=20261009"></script>
-<script src="bus.js?v=20261009"></script>
-<script src="plan.js?v=20261008"></script>
+<!-- 改了 js/css 要一起改 ?v=,否則 GitHub Pages 的快取可能讓新的 index.html 配到舊的檔案 -->
+<script src="metro.js?v=20261009m"></script>
 </body>
 </html>
