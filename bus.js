@@ -8,6 +8,7 @@
 //   避免跟 plan.js 的函式撞名。
 window.BusUI = (() => {
   const EST_MS = 20000;
+  const FAST_MS = 5000;        // 路線頁:公車在哪一站 5 秒更新(GetBusEvent 約 20 KB);到站時間(約 150 KB)還是 20 秒
   const NEAR_M = 500;          // 附近站牌的範圍(直線距離)
   const NEAR_GROUPS = 12;
   const DEFAULT_COLOR = '#1f62b4';
@@ -18,7 +19,7 @@ window.BusUI = (() => {
     tab: 'watch',
     route: null,                    // 路線頁:{ k, d, s: 選中的站牌, scroll: 要不要捲到選中的站, drawn }
     est: {}, estAt: {}, err: {},    // 城市 → 官方預估、下載時間、上次是否失敗
-    ev: {},                         // 城市 → Map('路線|方向' → [{ s: 站牌, on: 停在站上, plate }])
+    ev: {}, evAt: {},               // 城市 → Map('路線|方向' → [{ s: 站牌, on: 停在站上, plate }])、下載時間
     timer: null, loading: false, again: false,
     favs: LS.get('fav:v1', []),     // 常用站牌 [{ k, d, s, n: 站名 }]
     editing: false,
@@ -143,18 +144,22 @@ window.BusUI = (() => {
     S.timer = null;
     const cs = cities();
     if (!cs.length || document.hidden) return;
-    S.timer = setTimeout(refresh, EST_MS);
+    S.timer = setTimeout(refresh, S.route ? FAST_MS : EST_MS);
     if (S.loading) { S.again = true; return; }
     S.loading = true;
     try {
       await Promise.all(cs.map(async (c) => {
+        const needEst = !(Date.now() - (S.estAt[c] || 0) < EST_MS - 1000);
         const [est, ev] = await Promise.allSettled([
-          fetchGz(FEEDS[c].base + 'GetEstimateTime.gz', true),
+          needEst ? fetchGz(FEEDS[c].base + 'GetEstimateTime.gz', true) : null,
           fetchGz(FEEDS[c].base + 'GetBusEvent.gz', true),
         ]);
-        if (est.status === 'fulfilled') { S.est[c] = estMap(est.value.BusInfo); S.estAt[c] = Date.now(); delete S.err[c]; }
-        else S.err[c] = true;
-        if (ev.status === 'fulfilled') S.ev[c] = evMap(c, ev.value.BusInfo);
+        if (needEst && est.status === 'fulfilled') {
+          S.est[c] = estMap(est.value.BusInfo);
+          S.estAt[c] = Date.now();
+          delete S.err[c];
+        } else if (needEst) S.err[c] = true;
+        if (ev.status === 'fulfilled') { S.ev[c] = evMap(c, ev.value.BusInfo); S.evAt[c] = Date.now(); }
       }));
     } finally {
       S.loading = false;
@@ -169,7 +174,7 @@ window.BusUI = (() => {
     const cs = cities();
     if (!cs.length) return;
     const ages = cs.map((c) => Date.now() - (S.estAt[c] || 0));
-    if (Math.max(...ages) >= EST_MS - 1000) refresh();
+    if (S.route || Math.max(...ages) >= EST_MS - 1000) refresh();
     else if (!S.timer) S.timer = setTimeout(refresh, EST_MS - Math.max(...ages));
   }
   document.addEventListener('visibilitychange', () => { if (!document.hidden) ensure(); });
@@ -180,8 +185,11 @@ window.BusUI = (() => {
     if (cs.some((c) => S.err[c] && !S.est[c])) return '到站時間暫時抓不到,稍後自動重試';
     const at = Math.min(...cs.map((c) => S.estAt[c] || 0));
     if (!at) return '載入到站時間…';
-    const sec = Math.round((Date.now() - at) / 1000);
-    return (cs.some((c) => S.err[c]) ? '連線不穩・' : '') + `官方預估,${sec < 5 ? '剛剛' : sec + ' 秒前'}更新`;
+    const ago = (t) => { const s = Math.round((Date.now() - t) / 1000); return s < 3 ? '剛剛' : ` ${s} 秒前`; };
+    const warn = cs.some((c) => S.err[c]) ? '連線不穩・' : '';
+    const evAt = Math.min(...cs.map((c) => S.evAt[c] || 0));
+    if (S.route && evAt) return `${warn}公車位置${ago(evAt)}更新・到站時間${ago(at)}更新`;
+    return `${warn}官方預估,${ago(at).trim()}更新`;
   }
   function renderUpd() {
     const t = updText();
