@@ -7,6 +7,8 @@ const FEEDS = {
   ntpc: { name: '新北', base: 'https://tcgbusfs.blob.core.windows.net/ntpcbus/' },
 };
 const POLL_MS = 15000;
+// 正在看的路線頁:5 秒更新一次。官方檔案約 4 秒更新,但每台車大約 16 秒才回報一次位置(各台錯開)
+const FAST_POLL_MS = 5000;
 const ROUTE_CACHE_MS = 12 * 3600e3;
 const PALETTE = ['#d62728', '#1f62b4', '#2a8a2a', '#8e44ad', '#d35400', '#00838f',
   '#c2185b', '#6d4c41', '#3949ab', '#827717', '#00695c', '#455a64'];
@@ -271,7 +273,7 @@ function drawBuses() {
         m.bindPopup(() => popupHtml(m.bus), { autoPan: false });
         markers.set(id, m);
       } else {
-        m.setLatLng([lat, lon]);
+        glide(m, [lat, lon]);
         if (m.iconKey !== key) m.setIcon(busIcon(bus));
       }
       m.iconKey = key;
@@ -286,6 +288,21 @@ function drawBuses() {
   if (pendingFit) {
     if (fitRoute(pendingFit, true)) pendingFit = null;
   }
+}
+
+/** 公車標記在 1 秒內滑到新位置,看起來比較連續;距離太遠(資料跳動)或在背景就直接移過去 */
+function glide(m, to) {
+  const from = m.getLatLng();
+  cancelAnimationFrame(m.anim);
+  if (from.lat === to[0] && from.lng === to[1]) return;
+  if (document.hidden || from.distanceTo(to) > 500) return m.setLatLng(to);
+  const t0 = performance.now();
+  const step = (t) => {
+    const k = Math.min(1, (t - t0) / 1000);
+    m.setLatLng([from.lat + (to[0] - from.lat) * k, from.lng + (to[1] - from.lng) * k]);
+    if (k < 1) m.anim = requestAnimationFrame(step);
+  };
+  m.anim = requestAnimationFrame(step);
 }
 
 function fitRoute(k, quiet) {
@@ -323,11 +340,14 @@ async function poll() {
     setStatus('');
     return;
   }
+  // 開著路線頁時,那條路線的城市每 5 秒抓一次,其他城市還是 15 秒;剛加進來的城市馬上抓
+  const fast = routes[window.BusUI?.focus()?.k]?.c;
+  const due = cities.filter((c) => c === fast || !(Date.now() - (lastData[c]?.at || 0) < POLL_MS - 1000));
   polling = true;
   try {
-    const results = await Promise.allSettled(cities.map((c) => fetchGz(FEEDS[c].base + 'GetBusData.gz', true)));
+    const results = await Promise.allSettled(due.map((c) => fetchGz(FEEDS[c].base + 'GetBusData.gz', true)));
     results.forEach((r, i) => {
-      const c = cities[i];
+      const c = due[i];
       if (r.status === 'fulfilled') {
         lastData[c] = { at: Date.now(), rows: r.value.BusInfo };
         delete lastErr[c];
@@ -341,12 +361,12 @@ async function poll() {
     if (typeof onBusData === 'function') onBusData();
     const failed = cities.filter((c) => lastErr[c]);
     if (failed.length) setStatus(`${failed.map((c) => FEEDS[c].name).join('、')}資料暫時抓不到,稍後自動重試`, true);
-    else setStatus(`${new Date().toLocaleTimeString('zh-TW', { hour12: false })} 更新`);
+    else if (due.length) setStatus(`${new Date().toLocaleTimeString('zh-TW', { hour12: false })} 更新`);
   } finally {
     polling = false;
   }
   if (pollAgain) { pollAgain = false; return poll(); }
-  pollTimer = setTimeout(poll, POLL_MS);
+  pollTimer = setTimeout(poll, fast ? FAST_POLL_MS : POLL_MS);
 }
 
 document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
